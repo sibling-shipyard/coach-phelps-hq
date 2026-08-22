@@ -1,15 +1,21 @@
 import SwiftUI
 
-/// Native equivalent of Setup.tsx's wizard. Shown when pendingSetupLogin is set - signed in
-/// but no installation yet. Both steps use the shared in-app WKWebView cookie jar from sign-in.
+/// Native equivalent of Setup.tsx's wizard. Shown when pendingSetupLogin is set — signed in
+/// but setup not complete. Checks two conditions directly against GitHub's API so returning
+/// users aren't blocked by an expired server session:
+///   Step 1 — does `coach-<login>` repo exist?
+///   Step 2 — does the coach-phelps App have access to it?
+/// When both pass, sign-in is re-run automatically to re-establish the server session.
 struct SetupView: View {
     let login: String
     @EnvironmentObject var authManager: GitHubAuthManager
     @AppStorage(UserFacingError.devModeKey) private var devModeEnabled = false
 
     @State private var repoStepComplete = false
+    @State private var installStepComplete = false
+    @State private var isChecking = true
     @State private var isInstalling = false
-    @State private var isCheckingRepo = true
+    @State private var isAutoAdvancing = false
     @State private var errorMessage: String?
 
     private var generateURL: URL? {
@@ -64,7 +70,7 @@ struct SetupView: View {
             .padding(.top, 12)
         }
         .task(id: login) {
-            await refreshRepoStatus()
+            await refreshSetupStatus()
         }
     }
 
@@ -86,7 +92,7 @@ struct SetupView: View {
             }
             .onboardingReveal(index: 1)
 
-            if isCheckingRepo {
+            if isChecking {
                 ProgressView()
                     .scaleEffect(0.65)
                     .tint(WarmInstrument.inkMuted)
@@ -106,17 +112,25 @@ struct SetupView: View {
                 .onboardingReveal(index: 0)
                 .padding(.bottom, 28)
 
-            VStack(alignment: .leading, spacing: 18) {
-                numberedStep(1,
-                    prefix: "When GitHub asks which repositories to share, choose ",
-                    bold: "Only select repositories",
-                    suffix: ".")
-                numberedStep(2,
-                    prefix: "Pick ",
-                    bold: "coach-\(login)",
-                    suffix: ". Don't grant access to everything.")
+            if isChecking || isAutoAdvancing {
+                // Checking installation or auto-advancing — show spinner instead of instructions
+                ProgressView()
+                    .scaleEffect(0.65)
+                    .tint(WarmInstrument.inkMuted)
+                    .onboardingReveal(index: 1)
+            } else {
+                VStack(alignment: .leading, spacing: 18) {
+                    numberedStep(1,
+                        prefix: "When GitHub asks which repositories to share, choose ",
+                        bold: "Only select repositories",
+                        suffix: ".")
+                    numberedStep(2,
+                        prefix: "Pick ",
+                        bold: "coach-\(login)",
+                        suffix: ". Don't grant access to everything.")
+                }
+                .onboardingReveal(index: 1)
             }
-            .onboardingReveal(index: 1)
         }
         .padding(.horizontal, 32)
     }
@@ -153,45 +167,57 @@ struct SetupView: View {
 
     private var actionSection: some View {
         VStack(spacing: 12) {
-            if let error = errorMessage ?? authManager.lastNetworkError {
-                Text(UserFacingError.friendlyAPIError(error))
+            if let error = errorMessage {
+                Text(error)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(WarmInstrument.alarmFg)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 4)
-                if devModeEnabled {
-                    Text(error)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(WarmInstrument.inkFaint)
-                        .multilineTextAlignment(.center)
-                }
             }
 
-            Button {
-                Haptics.tap()
-                if repoStepComplete {
-                    continueToInstall()
-                } else {
-                    openCreateRepo()
-                }
-            } label: {
-                HStack(spacing: 10) {
-                    if isInstalling {
-                        ProgressView()
-                            .tint(WarmInstrument.paper)
-                            .scaleEffect(0.85)
-                            .transition(.scale.combined(with: .opacity))
+            // Primary button — hidden while auto-advancing (sign-in runs automatically)
+            if !isAutoAdvancing {
+                Button {
+                    Haptics.tap()
+                    if repoStepComplete {
+                        continueToInstall()
+                    } else {
+                        openCreateRepo()
                     }
-                    Text(primaryButtonLabel)
-                        .contentTransition(.opacity)
+                } label: {
+                    HStack(spacing: 10) {
+                        if isInstalling {
+                            ProgressView()
+                                .tint(WarmInstrument.paper)
+                                .scaleEffect(0.85)
+                                .transition(.scale.combined(with: .opacity))
+                        }
+                        Text(primaryButtonLabel)
+                            .contentTransition(.opacity)
+                    }
+                    .animation(PremiumMotion.press, value: isInstalling)
                 }
-                .animation(PremiumMotion.press, value: isInstalling)
+                .buttonStyle(WarmSetupButtonStyle(primary: true))
+                .disabled(primaryButtonDisabled)
+                .onboardingReveal(index: 5)
             }
-            .buttonStyle(WarmSetupButtonStyle(primary: true))
-            .disabled(primaryButtonDisabled)
-            .onboardingReveal(index: 5)
+
+            // Secondary: re-run full sign-in for users whose server session expired.
+            // Only shown on step 2 when not currently in-progress.
+            if repoStepComplete && !isChecking && !isAutoAdvancing && !isInstalling {
+                Button {
+                    Haptics.tap()
+                    signInAgain()
+                } label: {
+                    Text("Already linked? Sign in again")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(WarmInstrument.inkMuted)
+                }
+                .onboardingReveal(index: 6)
+            }
         }
         .animation(PremiumMotion.onboardingReveal, value: repoStepComplete)
+        .animation(PremiumMotion.state, value: isAutoAdvancing)
     }
 
     private var primaryButtonLabel: String {
@@ -203,31 +229,65 @@ struct SetupView: View {
 
     private var primaryButtonDisabled: Bool {
         if repoStepComplete {
-            return isInstalling
+            return isInstalling || isChecking
         }
-        return generateURL == nil || isCheckingRepo
+        return generateURL == nil || isChecking
     }
 
-    // MARK: - Actions
+    // MARK: - Status checks
 
-    private func refreshRepoStatus() async {
-        isCheckingRepo = true
-        defer { isCheckingRepo = false }
+    /// Checks both prerequisites directly against GitHub's API.
+    /// Step 1: does the coach-<login> repo exist?
+    /// Step 2: does the coach-phelps App have access to it?
+    /// When both pass, re-runs sign-in automatically to establish a server session.
+    private func refreshSetupStatus() async {
+        isChecking = true
+        defer { isChecking = false }
 
-        // Never downgrade — URL detection may mark complete before the REST API catches up.
-        if await authManager.coachRepoExists(for: login) {
-            repoStepComplete = true
-            return
-        }
-
-        // One retry after browse dismiss — GitHub can lag a second after repo create.
+        // Step 1 — repo
+        let repoExists = await authManager.coachRepoExists(for: login)
         if !repoStepComplete {
-            try? await Task.sleep(for: .seconds(1))
-            if await authManager.coachRepoExists(for: login) {
+            if !repoExists {
+                // One retry — GitHub can lag a second after repo create.
+                try? await Task.sleep(for: .seconds(1))
+                repoStepComplete = await authManager.coachRepoExists(for: login)
+            } else {
                 repoStepComplete = true
             }
         }
+
+        guard repoStepComplete else { return }
+
+        // Step 2 — GitHub App installation (direct API, no server session dependency)
+        let appInstalled = await authManager.coachAppInstalled(for: login)
+        guard appInstalled else { return }
+        installStepComplete = true
+
+        // Both conditions met — re-run sign-in so the server can re-discover the
+        // installation and issue a fresh session token.
+        await autoAdvance()
     }
+
+    /// Re-runs the full OAuth sign-in. GitHub cookies from the preceding sign-in make this
+    /// silent for the user (WKWebView opens and closes without interaction). The server
+    /// re-discovers the existing installation and issues a proper session token.
+    private func autoAdvance() async {
+        isAutoAdvancing = true
+        defer { isAutoAdvancing = false }
+        do {
+            try await authManager.signIn()
+            // Success: state transitions to .active and SetupView disappears.
+            // If needs_setup=1 came back again, pendingSetupLogin stays set and this view
+            // remains — fall through to show "Link Your Log" as a manual fallback.
+        } catch {
+            // Cancelled or network error — surface through errorMessage only if non-trivial.
+            if !(error is WebAuthError) {
+                errorMessage = UserFacingError.message(for: error, devMode: devModeEnabled)
+            }
+        }
+    }
+
+    // MARK: - Actions
 
     @MainActor
     private func markRepoComplete() {
@@ -251,7 +311,7 @@ struct SetupView: View {
             },
             onDismiss: {
                 Task { @MainActor in
-                    await refreshRepoStatus()
+                    await refreshSetupStatus()
                 }
             }
         )
@@ -270,6 +330,23 @@ struct SetupView: View {
                 Haptics.error()
             }
             isInstalling = false
+            // Intentionally no refreshSetupStatus() here — calling it re-arms autoAdvance()
+            // because installStepComplete is already true, causing a browser open/close loop.
+            // Use "Already linked? Sign in again" for manual recovery if the install succeeded
+            // but the server callback didn't arrive.
+        }
+    }
+
+    private func signInAgain() {
+        errorMessage = nil
+        Task {
+            do {
+                try await authManager.signIn()
+                Haptics.success()
+            } catch {
+                errorMessage = UserFacingError.message(for: error, devMode: devModeEnabled)
+                Haptics.error()
+            }
         }
     }
 }

@@ -59,6 +59,7 @@ class GitHubAuthManager: ObservableObject {
     /// Identical entry point for new and returning users, matching the web "Log in with
     /// GitHub" button. PKCE/state/token-exchange all live server-side in start.ts + callback.ts.
     func signIn() async throws {
+        lastNetworkError = nil
         try await runAuthSession(path: "/api/auth/start")
     }
 
@@ -83,18 +84,54 @@ class GitHubAuthManager: ObservableObject {
             )
             try await handleCallback(callbackURL)
         } catch WebAuthError.cancelled {
-            // The user dismissed the WebView (GitHub's post-install redirect may not have
-            // produced a coachhq:// callback). Try bootstrapSession() — if the installation
-            // completed on GitHub's side, resolveRepoIfNeeded() will find the repo and
-            // clear pendingSetupLogin, routing the app forward without the callback URL.
-            await bootstrapSession()
-            if pendingSetupLogin != nil {
-                // Session is still in setup state — installation didn't complete yet.
-                throw AuthError.missingCallback
+            // Browser dismissed without a coachhq:// callback — fall through.
+        }
+
+        // If pendingSetupLogin is still set the install didn't produce a usable callback.
+        // Don't call bootstrapSession() here — it resets isSessionReady which unmounts
+        // SetupView and triggers a re-mount loop via .task → refreshSetupStatus → autoAdvance.
+        // SetupView's "Already linked? Sign in again" button is the recovery path.
+        if pendingSetupLogin != nil {
+            throw AuthError.missingCallback
+        }
+    }
+
+    /// Whether the coach-phelps GitHub App is installed and has access to `coach-<login>`.
+    /// Calls GitHub directly (no server session dependency) so it works for returning users
+    /// whose server session has expired. Two calls: one for the installation list, one to
+    /// confirm repo access when repository_selection is "selected" (not "all").
+    func coachAppInstalled(for login: String) async -> Bool {
+        guard let token = await validToken() else { return false }
+        guard let url = URL(string: "https://api.github.com/user/installations") else { return false }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return false }
+            let result = try JSONDecoder().decode(AppInstallationsResponse.self, from: data)
+
+            guard let installation = result.installations.first(where: { $0.appSlug == "coach-phelps" }) else {
+                return false
             }
-            // Repo resolved — bootstrapSession() doesn't set isAuthenticated, so set it
-            // now so deriveState() routes to .active instead of .unauthenticated.
-            isAuthenticated = true
+            // "all" selection covers every repo the user owns.
+            if installation.repositorySelection == "all" { return true }
+
+            // "selected" — confirm the coach-<login> repo is in the allowed list.
+            guard let reposURL = URL(string: "https://api.github.com/user/installations/\(installation.id)/repositories") else {
+                return false
+            }
+            var reposRequest = URLRequest(url: reposURL)
+            reposRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            reposRequest.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+            let (reposData, reposResponse) = try await URLSession.shared.data(for: reposRequest)
+            guard (reposResponse as? HTTPURLResponse)?.statusCode == 200 else { return false }
+            let repos = try JSONDecoder().decode(AppInstallationReposResponse.self, from: reposData)
+            return repos.repositories.contains { $0.name.lowercased() == "coach-\(login)".lowercased() }
+        } catch {
+            print("coachAppInstalled check failed: \(error)")
+            return false
         }
     }
 
@@ -168,7 +205,10 @@ class GitHubAuthManager: ObservableObject {
 
         if value("needs_setup") == "1" {
             // Server now includes the GitHub token so we can fetch user.id before the
-            // install step. isAuthenticated stays false — no coach-phelps installation yet.
+            // install step. isAuthenticated must be false — no coach-phelps installation yet.
+            // Explicitly clear it: init() may have set it to true when a stored token was
+            // found, and it must not stay true while pendingSetupLogin is set.
+            isAuthenticated = false
             if let token = value("token") {
                 saveToken(token)
                 if let rt = value("refresh_token"), let expiresAtRaw = value("expires_at"),
@@ -211,6 +251,7 @@ class GitHubAuthManager: ObservableObject {
     /// a stored token.
     func bootstrapSession() async {
         isSessionReady = false
+        lastNetworkError = nil
         await fetchUser()
         normalizeSelectedRepo()
         await resolveRepoIfNeeded()
@@ -221,10 +262,14 @@ class GitHubAuthManager: ObservableObject {
             isSessionReady = true
             return
         }
-        // Couldn't resolve a repo at all - route back into Setup instead of leaving
-        // CoachHQApp stuck on a broken MainTabView with no repo.
         if selectedRepo == nil {
             pendingSetupLogin = user?.login
+        } else {
+            // Repo resolved — clear any lingering setup state so deriveState() routes
+            // to .active. Without this, a needs_setup=1 callback that set pendingSetupLogin
+            // would keep the app stuck on SetupView even after the installation completes
+            // and resolveRepoIfNeeded() finds the repo.
+            pendingSetupLogin = nil
         }
         // Token present but user and repo both unresolvable — stale or revoked token.
         // signOut() clears the keychain so the next launch gets a clean LoginView
@@ -246,10 +291,19 @@ class GitHubAuthManager: ObservableObject {
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
-            if let http = response as? HTTPURLResponse, http.statusCode == 409,
+            guard let http = response as? HTTPURLResponse else { return }
+            if http.statusCode == 409,
                let result = try? JSONDecoder().decode(RepoResolution.self, from: data),
                result.reason == "multiple_repos_granted" {
                 multipleReposDetected = true
+                return
+            }
+            // Non-2xx responses (e.g. 401 token rejected by server) return an error body
+            // that won't decode as RepoResolution — treat them as no-repo-found rather than
+            // silently discarding. selectedRepo stays nil and bootstrapSession routes
+            // to pendingSetupLogin or zombie-token cleanup as appropriate.
+            guard (200..<300).contains(http.statusCode) else {
+                print("list-my-repos HTTP \(http.statusCode) — treating as unresolved")
                 return
             }
             if let result = try? JSONDecoder().decode(RepoResolution.self, from: data) {
@@ -458,6 +512,30 @@ struct GitHubUser: Codable {
         case id
         case login
         case avatarUrl = "avatar_url"
+    }
+}
+
+private struct AppInstallationsResponse: Codable {
+    let installations: [AppInstallation]
+}
+
+private struct AppInstallation: Codable {
+    let id: Int
+    let appSlug: String
+    let repositorySelection: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case appSlug = "app_slug"
+        case repositorySelection = "repository_selection"
+    }
+}
+
+private struct AppInstallationReposResponse: Codable {
+    let repositories: [AppInstallationRepo]
+
+    struct AppInstallationRepo: Codable {
+        let name: String
     }
 }
 
