@@ -6,7 +6,7 @@ This file is the curated view; issues are the record. Flip a box here or tell Un
 
 **Priority:** P0 unblocks Nats · P1 unblocks 10 users · P2 good to have (incl. M4)
 
-## 🎯 Now — M2: Onboard Nats
+## ✅ M2: Onboard Nats
 
 ### ✅ Epic: Chat reliability — THE GATE (#295) — CLOSED Aug 22
 
@@ -17,16 +17,16 @@ This file is the curated view; issues are the record. Flip a box here or tell Un
 - [x] #347 Refactor coach-chat.ts
 - [x] #424 validate-soul can't fail CI
 
-### 🟥 Epic: Onboard Nats (#299) — OPEN (1 left)
+### ✅ Epic: Onboard Nats (#299) — CLOSED Aug 22
 
 - [x] #300 Remove sleep analytics (simplify onboarding)
 - [x] #301 Remove PRE
 - [x] #358 Carve ships no SOUL — a fresh repo cannot run BYOB
-- [ ] #292 bob: pre-populate vs_usual baseline — moved to M3 (p1) per 2026-08-22, not blocking Nats
+- [x] #292 bob: pre-populate vs_usual baseline — moved to M3 (p1) per 2026-08-22, not blocking Nats
 
 _Supporting:_ #292 now in M3
 
-## 🔜 Next — M3: Scale to 10
+## 🎯 Now — M3: Scale to 10
 
 ### Epic: New-user magic (#302)
 
@@ -49,7 +49,7 @@ _Supporting:_ #292 now in M3
 
 - [ ] #314 Generalize home widgets beyond current sports
 - [ ] #315 Badminton + calisthenics analytics
-- [ ] #316 challenge_v2 seasons/phases + quest_history (refs #86)
+- [x] #316 challenge_v2 seasons/phases + quest_history — absorbed into #86/#378; leftover is #411
 - [ ] #156 healthkit-enrichment
 - [ ] #365 Workout templates aren't generic — Coach can't personalise them
 - [ ] #367 Audit the quest/gamification system end to end
@@ -58,7 +58,7 @@ _Supporting:_ #292 now in M3
 ### Epic: Coach depth (#317)
 
 - [x] #357 SOUL v5.8 trim (509 → ~232 app / ~289 BYOB)
-- [ ] #318 SOUL split (post-trim)
+- [x] #318 SOUL split (post-trim)
 - [ ] #359 App silently drops archive writes
 - [ ] #360 What does an ordinary turn need in context?
 - [ ] #319 Coach patterns per user
@@ -87,10 +87,8 @@ _Supporting:_ #292 now in M3
 - [ ] #417 Widen validate_kdb path-checking to .claude/hooks/
 - [ ] #419 decide schema-version migration policy before version:2
 - [ ] #436 coach_log.json grows unbounded — cap/rotate storage
-- [ ] #440 [ios] Sync permanently misses workouts that reach the phone after the last sync — p0, merging tonight, not blocking M2 per Akash
-- [ ] #441 [ios] Health Settings: list recent HealthKit workouts with synced state + manual import
 - [ ] #462 Hard caps on agent-written free text — per-entry limits in SOUL + validate-data
-- [ ] #392 Delegation rule charges a cold boot for every task
+- [x] #392 Delegation rule charges a cold boot for every task
 
 ### Epic: Stretch features — M3 (#330)
 
@@ -139,6 +137,7 @@ Schema migration done (Part 1 #406, Part 2 #409/#412, #408, #410). Epic tracks f
 
 ## ✅ Done
 
+**Aug 22 — M3 board hygiene:** #299 M2 epic closed (#292 lives in M3), #316 absorbed into #411, #318/#392 closed as shipped, #440/#441 iOS sync+Health Settings shipped
 **Aug 22 2026 — M2 Chat gate closed:** #295 epic closed, #296 MVP chat, #297 Gemini e2e, #298 FSP, #424 validate-soul CI, #358 carve SOUL fix, #459 athlete_insights bucket fix
 **Aug 22 — Auto-sync:** Auto-sync when new activity lands — already works (moved from Vision)
 **Aug 16-21 — Schema + trim:** #300 sleep analytics removed, #301 PRE removed, #406 Part 1 schema, #408/#409/#412 Part 2 schema, #357 SOUL trim, #362 predicate, #363 carve drift, #366 validate-soul lint, #455 carve-skeleton + migration plan
